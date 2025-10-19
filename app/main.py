@@ -1,5 +1,6 @@
 import csv
 import time
+import os
 from pathlib import Path
 from openpyxl import Workbook
 
@@ -13,7 +14,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 INPUT_FILE = Path("input_dnis.csv")
-OUTPUT_FILE = Path(f"../output/resultados_{int(time.time())}.xlsx")
+OUTPUT_FILE = Path("/output/resultados.xlsx")
 URL = "https://consultaelectoral.onpe.gob.pe/inicio"
 
 
@@ -30,27 +31,66 @@ def leer_dnis():
 
 def crear_driver():
     options = Options()
-    options.add_argument("--start-maximized")
-    service = Service("chromedriver.exe")
+    options.binary_location = "/usr/bin/chromium"
+
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=es-PE")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    )
+
+    service = Service("/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
+
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """
+    })
+
     return driver
 
-
 def encontrar_input_dni(driver, wait):
+    time.sleep(5)
+
+    # debug: guarda HTML para ver qué cargó realmente
+    with open("/output/debug_onpe_inicio.html", "w", encoding="utf-8") as f:
+        f.write(driver.page_source)
+
     selectores = [
         "//input[@type='text']",
+        "//input[@maxlength='8']",
         "//input[contains(@placeholder,'DNI')]",
+        "//input[contains(@placeholder,'dni')]",
         "//input",
     ]
 
+    ultimo_error = None
+
     for xpath in selectores:
         try:
-            return wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
-        except:
-            pass
+            elem = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+            if elem:
+                return elem
+        except Exception as e:
+            ultimo_error = e
+
+    # también guarda screenshot para depurar
+    driver.save_screenshot("/output/debug_onpe_inicio.png")
 
     raise Exception("No se encontró el campo DNI")
-
 
 def hacer_click_consultar(driver, wait):
     selectores = [
@@ -64,7 +104,7 @@ def hacer_click_consultar(driver, wait):
         try:
             boton = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", boton)
-            time.sleep(1)
+            time.sleep(5)
             driver.execute_script("arguments[0].click();", boton)
             return True
         except:
@@ -86,7 +126,7 @@ def esperar_resultado(driver, wait):
         time.sleep(5)
 
 
-def texto(xpath, driver):
+def texto(driver, xpath):
     try:
         return driver.find_element(By.XPATH, xpath).text.strip()
     except:
@@ -97,12 +137,12 @@ def consultar_dni(driver, dni):
     wait = WebDriverWait(driver, 20)
 
     driver.get(URL)
-    time.sleep(2)
+    time.sleep(5)
 
     input_dni = encontrar_input_dni(driver, wait)
     input_dni.clear()
     input_dni.send_keys(dni)
-    time.sleep(1)
+    time.sleep(5)
 
     clic_ok = hacer_click_consultar(driver, wait)
 
@@ -110,7 +150,6 @@ def consultar_dni(driver, dni):
         return {
             "dni": dni,
             "miembro_mesa": "Error al consultar",
-            "nombres": "",
             "ubicacion": "",
             "direccion": ""
         }
@@ -118,68 +157,56 @@ def consultar_dni(driver, dni):
     esperar_resultado(driver, wait)
 
     pagina = driver.page_source.upper()
+    url_actual = driver.current_url.lower()
 
-    # Miembro de mesa
+    if "500" in pagina or "INTERNAL SERVER ERROR" in pagina:
+        return {
+            "dni": dni,
+            "miembro_mesa": "Error 500 ONPE",
+            "ubicacion": "",
+            "direccion": ""
+        }
+
     if "NO ERES MIEMBRO DE MESA" in pagina:
         miembro = "No"
-    elif "ERES MIEMBRO DE MESA" in pagina:
+    elif "MIEMBRO DE MESA" in pagina:
         miembro = "Si"
     else:
         miembro = "No encontrado"
 
-    # Nombres
-    nombres = texto(
-        "//*[contains(text(),'Nombres y Apellidos')]/following-sibling::*[1]",
-        driver
-    )
-
-    if not nombres:
-        nombres = texto(
-            "//*[contains(text(),'Nombres y Apellidos')]/parent::*//*[last()]",
-            driver
-        )
-
-    # Ubicación
     ubicacion = texto(
-        "//*[contains(text(),'Región / Provincia / Distrito')]/following-sibling::*[1]",
-        driver
+        driver,
+        "//*[contains(text(),'Región / Provincia / Distrito')]/following-sibling::*[1]"
     )
 
     if not ubicacion:
         ubicacion = texto(
-            "//*[contains(text(),'Región / Provincia / Distrito')]/parent::*//*[last()]",
-            driver
+            driver,
+            "//*[contains(text(),'Región / Provincia / Distrito')]/parent::*//*[last()]"
         )
 
-    # Dirección / local de votación
-    direccion = texto(
-        "//*[contains(text(),'Tu local de votación')]/ancestor::*[1]/following::*[contains(text(),'IEI') or contains(text(),'I.E.') or contains(text(),'COLEGIO')][1]",
-        driver
+    nombre_local = texto(
+        driver,
+        "//*[contains(text(),'Tu local de votación')]/following::*[1]"
     )
+    direccion_local = texto(
+        driver,
+        "//*[contains(text(),'Tu local de votación')]/following::*[2]"
+    )
+
+    direccion = ""
+    if nombre_local and direccion_local:
+        direccion = f"{nombre_local} - {direccion_local}"
 
     if not direccion:
         direccion = texto(
-            "//*[contains(text(),'Tu local de votación')]/following::*[contains(text(),'MZ') or contains(text(),'JR') or contains(text(),'AV')][1]",
-            driver
+            driver,
+            "//*[contains(text(),'Local de votación')]/following::*[1]"
         )
-
-    # Mejor lectura del bloque del local
-    nombre_local = texto(
-        "//*[contains(text(),'Tu local de votación')]/following::*[1]",
-        driver
-    )
-    direccion_local = texto(
-        "//*[contains(text(),'Tu local de votación')]/following::*[2]",
-        driver
-    )
-
-    if nombre_local and direccion_local:
-        direccion = f"{nombre_local} - {direccion_local}"
 
     return {
         "dni": dni,
         "miembro_mesa": miembro,
-        "nombres": nombres,
         "ubicacion": ubicacion,
         "direccion": direccion
     }
@@ -192,13 +219,12 @@ def generar_excel(resultados):
     ws = wb.active
     ws.title = "Resultados"
 
-    ws.append(["DNI", "Miembro de mesa", "Nombres", "Ubicacion", "Direccion"])
+    ws.append(["DNI", "Miembro de mesa", "Ubicacion", "Direccion"])
 
     for r in resultados:
         ws.append([
             r["dni"],
             r["miembro_mesa"],
-            r["nombres"],
             r["ubicacion"],
             r["direccion"]
         ])
@@ -217,7 +243,7 @@ def main():
             datos = consultar_dni(driver, dni)
             print(datos)
             resultados.append(datos)
-            time.sleep(2)
+            time.sleep(5)
     finally:
         driver.quit()
 
