@@ -41,7 +41,7 @@ docker run --rm caso2:v1
 Salida
 El Excel se guarda en output/.
 
-URL del repositorio
+URL del repositorio: https://github.com/yashira692/practica01
 
 Nota:
 El proyecto utiliza Selenium para automatizar consultas en el portal ONPE.
